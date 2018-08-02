@@ -1,4 +1,4 @@
-param($HPOCPassword)
+param($HPOCPassword, $POC, $ESXiHost)
 
 # Create a banner because we want it to be pretty
 function Banner {
@@ -7,30 +7,67 @@ function Banner {
 	write-host "`n---------------------------------`n" -f yellow
 }
 
-function Setup-PrismElement($HPOC, $PEPassword) {
-	<# Set header info to login to PE
-	$Header = @{"Authorization" = "Basic "+[System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes('admin'+":"+"nutanix/4u"))}
+function Setup-PrismElement($HPOC, $PEPassword, $HPOCPassword) {
+	# Do a bunch of work around crap to work with invalid certs
+	if (-not ([System.Management.Automation.PSTypeName]'ServerCertificateValidationCallback').Type) {
+$certCallback = @"
+    using System;
+    using System.Net;
+    using System.Net.Security;
+    using System.Security.Cryptography.X509Certificates;
+    public class ServerCertificateValidationCallback
+    {
+        public static void Ignore()
+        {
+            if(ServicePointManager.ServerCertificateValidationCallback ==null)
+            {
+                ServicePointManager.ServerCertificateValidationCallback +=
+                    delegate
+                    (
+                        Object obj,
+                        X509Certificate certificate,
+                        X509Chain chain,
+                        SslPolicyErrors errors
+                    )
+                    {
+                        return true;
+                    };
+            }
+        }
+    }
+"@
+    Add-Type $certCallback
+}
+	[ServerCertificateValidationCallback]::Ignore()
+	[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-	# Login to PE and accept EULA
-	$EULAJson = @{
-		username = "SE with CreateVCSA.ps1"
-		companyName = "Nutanix"
-		jobTitle = "SE"
-	} | ConvertTo-Json
-	$EULAResponse = Invoke-RestMethod https://10.21.14.29:9440/PrismGateway/services/rest/v1/eulas/accept -Headers $Header -Method Put -Body $EULAJson -ContentType 'application/json'#>
+	$HPOCIP = "10.21." + $HPOC + ".29"
 
-	# Add NTNX Cmdlets
-	Add-PSSnapin NutanixCmdletsPSSnapin
+	# Set header info to login to PE
+	$Header = @{"Authorization" = "Basic "+[System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes('admin'+":"+"$PEPassword"))}
 
-	# Login to PE
-	$PEPassword = ConvertTo-SecureString "$PEPassword" -AsPlainText -Force
-	$Connect = Connect-NTNXCluster -Server $HPOC -UserName admin -Password $PEPassword -AcceptInvalidSSLCerts
+	# CD to Putty Directory
+  cd "C:\Program Files (x86)\PuTTY\"
 
-	# Create Containers
-	if(!(Get-NTNXContainer).Name -eq "VMware") { $CreateContainer = New-NTNXContainer -Name "VMware" }
+	# Set PE Password
+	$HPOCIP = "10.21." + $HPOC + ".29"
+  $Result = echo y | ./plink.exe nutanix@$HPOCIP -pw $PEPassword "~/prism/cli/ncli user reset-password user-name=admin password=$HPOCPassword"
+
+  # Accept EULA
+	$EULAJson = '{"username": "SE with stage_calmhow.sh","companyName": "Nutanix","jobTitle": "SE"}'
+	$EULAAddress = "https://" + $HPOCIP + ":" + "9440/PrismGateway/services/rest/v1/eulas/accept"
+	$EULAResponse = Invoke-RestMethod $EULAAddress -Headers $Header -Method POST -Body $EULAJson -ContentType 'application/json'
+
+	# Disable Pulse
+	$PULSEJson = '{"emailContactList":null,"enable":false,"verbosityType":null,"enableDefaultNutanixEmail":false,"defaultNutanixEmail":null,"nosVersion":null,"isPulsePromptNeeded":false,"remindLater":null}'
+	$PULSEAddress = "https://" + $HPOCIP + ":" + "9440/PrismGateway/services/rest/v1/pulse"
+	$PULSEResponse = Invoke-RestMethod $PULSEAddress -Headers $Header -Method PUT -Body $PULSEJson -ContentType 'application/json'
+
+	# TODO: Create storage container
+	# if(!(Get-NTNXContainer).Name -eq "VMware") { $CreateContainer = New-NTNXContainer -Name "VMware" }
 }
 
-function New-DeployVCSA($HPOCPass) {
+function New-DeployVCSA($HPOCPass, $POC, $ESXiHost) {
 	# Draw Banner
 	cls
 	Banner
@@ -72,10 +109,12 @@ function New-DeployVCSA($HPOCPass) {
 		$HPOCPass = read-host
 	}
 
-	# TODO: Setup PE
-	#Setup-PrismElement $ESXiGuess $HPOCPass
+	# Setup PE TODO: Fix hardcoded PW
+	Setup-PrismElement $HPOC nutanix/4u $HPOCPass
 
 	# TODO: Check Login before sending deployment package
+
+	# TODO: Ask for verification
 
 	# Create JSON Package
 	$JSON = @{
@@ -113,4 +152,4 @@ function New-DeployVCSA($HPOCPass) {
 	sleep 600
 }
 
-New-DeployVCSA -HPOCPass $HPOCPassword
+New-DeployVCSA -HPOCPass $HPOCPassword -POC $POC -ESXiHost $ESXiHost
